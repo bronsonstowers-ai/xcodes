@@ -1,7 +1,8 @@
 import Path
 import XCTest
 import Version
-@testable import XcodesKit
+import XcodesKit
+@testable import XcodesCLIKit
 
 final class ModelsFirstWithVersionTests: XCTestCase {
     let xcodes = [
@@ -89,6 +90,10 @@ final class ModelsFirstWithVersionTests: XCTestCase {
         )
         XCTAssertEqual(
             installedXcodes.first(withVersion: Version(xcodeVersion: "1.2.3 Beta 2")!),
+            InstalledXcode(path: Path("/Applications/Xcode-1.2.3-beta.2.app")!, version: Version(xcodeVersion: "1.2.3 Beta 2")!)
+        )
+        XCTAssertEqual(
+            installedXcodes.first(withVersion: Version(xcodeVersion: "1.2.3b2")!),
             InstalledXcode(path: Path("/Applications/Xcode-1.2.3-beta.2.app")!, version: Version(xcodeVersion: "1.2.3 Beta 2")!)
         )
         

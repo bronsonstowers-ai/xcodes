@@ -1,65 +1,65 @@
-import PromiseKit
 import Foundation
-import Version
-import Path
+import os
+import XcodesKit
 
-public class RuntimeList {
+public final class RuntimeList: Sendable {
+    private let store: OSAllocatedUnfairLock<RuntimeListStore>
+
     public init() {
+        var store = Self.makeStore()
+        try? store.loadCachedDownloadableRuntimes()
+        self.store = OSAllocatedUnfairLock(initialState: store)
     }
 
-    public func printAvailableRuntimes(includeBetas: Bool) async throws {
-        let downloadables = try await downloadableRuntimes(includeBetas: includeBetas)
-        var installed = try await installedRuntimes()
-        for (platform, downloadables) in Dictionary(grouping: downloadables, by: \.platform).sorted(\.key.order) {
-            Current.logging.log("-- \(platform.shortName) --")
-            for downloadable in downloadables {
-                let matchingInstalledRuntimes = installed.remove { $0.build == downloadable.simulatorVersion.buildUpdate }
-                let name = downloadable.visibleName
-                if !matchingInstalledRuntimes.isEmpty {
-                    for matchingInstalledRuntime in matchingInstalledRuntimes {
-                        switch matchingInstalledRuntime.kind {
-                            case .bundled:
-                                Current.logging.log(name + " (Bundled with selected Xcode)")
-                            case .diskImage, .legacyDownload:
-                                Current.logging.log(name + " (Downloaded)")
-                        }
-                    }
-                } else {
-                    Current.logging.log(name)
+    var runtimeService: RuntimeService {
+        Self.makeRuntimeService()
+    }
+
+    private static func makeRuntimeService() -> RuntimeService {
+        return RuntimeService(
+            loadData: { request in
+                let (data, response) = try await Current.network.data(for: request)
+                return (data, response)
+            },
+            contentsAtPath: { path in Current.files.contents(atPath: path) },
+            installedRuntimesOutput: Current.shell.installedRuntimes,
+            installRuntimeImageOutput: Current.shell.installRuntimeImage,
+            mountDMGOutput: Current.shell.mountDmg,
+            unmountDMGOutput: Current.shell.unmountDmg
+        )
+    }
+
+    private static func makeStore() -> RuntimeListStore {
+        RuntimeListStore(
+            cache: DownloadableRuntimeCache(
+                cacheFile: .runtimeCacheFile,
+                contentsAtPath: { path in Current.files.contents(atPath: path) },
+                writeData: { data, url in try Current.files.write(data, to: url) },
+                createDirectory: { url, createIntermediates, attributes in
+                    try Current.files.createDirectory(
+                        at: url,
+                        withIntermediateDirectories: createIntermediates,
+                        attributes: attributes
+                    )
                 }
-            }
-        }
-        Current.logging.log("\nNote: Bundled runtimes are indicated for the currently selected Xcode, more bundled runtimes may exist in other Xcode(s)")
+            ),
+            service: makeRuntimeService()
+        )
     }
 
-    func downloadableRuntimes(includeBetas: Bool) async throws -> [DownloadableRuntime] {
-        let (data, _) = try await Current.network.dataTask(with: URLRequest.runtimes).async()
-        let decodedResponse = try PropertyListDecoder().decode(DownloadableRuntimesResponse.self, from: data)
-        return includeBetas ? decodedResponse.downloadables : decodedResponse.downloadables.filter { $0.betaVersion == nil }
+    func downloadableRuntimes() async throws -> [DownloadableRuntime] {
+        try await updateDownloadableRuntimeList().runtimes
+    }
+
+    func updateDownloadableRuntimeList() async throws -> RuntimeListStore.UpdateResult {
+        var updatedStore = store.withLock { $0 }
+        let result = try await updatedStore.updateDownloadableRuntimeList()
+        let finishedStore = updatedStore
+        store.withLock { $0 = finishedStore }
+        return result
     }
 
     func installedRuntimes() async throws -> [InstalledRuntime] {
-        let output = try await Current.shell.installedRuntimes().async()
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let outputDictionary = try decoder.decode([String: InstalledRuntime].self, from: output.out.data(using: .utf8)!)
-        return outputDictionary.values.sorted { first, second in
-            return first.identifier.uuidString.compare(second.identifier.uuidString, options: .numeric) == .orderedAscending
-        }
-    }
-}
-
-extension Array {
-    fileprivate mutating func remove(where predicate: ((Element) -> Bool)) -> [Element] {
-        guard !isEmpty else { return [] }
-        var removed: [Element] = []
-        self = filter { current in
-            let satisfy = predicate(current)
-            if satisfy {
-                removed.append(current)
-            }
-            return !satisfy
-        }
-        return removed
+        try await runtimeService.installedRuntimes()
     }
 }

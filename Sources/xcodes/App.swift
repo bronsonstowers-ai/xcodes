@@ -1,11 +1,15 @@
 import Foundation
-import ArgumentParser
+@preconcurrency import ArgumentParser
 import Version
-import PromiseKit
+import XcodesCLIKit
 import XcodesKit
 import LegibleError
 import Path
-import Rainbow
+@preconcurrency import Rainbow
+
+func configureRainbow(enabled: Bool) {
+    Rainbow.enabled = Rainbow.enabled && enabled
+}
 
 func getDirectory(possibleDirectory: String?, default: Path = Path.root.join("Applications")) -> Path {
     let directory = possibleDirectory.flatMap(Path.init) ??
@@ -51,22 +55,50 @@ struct GlobalColorOption: ParsableArguments {
     var color: Bool = true
 }
 
+extension ArchitectureFilter: @retroactive ExpressibleByArgument {
+    public init?(argument: String) {
+        self.init(argument)
+    }
+}
+
 @main
 struct Xcodes: AsyncParsableCommand {
-    static var configuration = CommandConfiguration(
+    static let configuration = CommandConfiguration(
         abstract: "Manage the Xcodes installed on your Mac",
         shouldDisplay: true,
         subcommands: [Download.self, Install.self, Installed.self, List.self, Runtimes.self, Select.self, Uninstall.self, Update.self, Version.self, Signout.self]
     )
 
-    static var xcodesConfiguration = Configuration()
-    static let xcodeList = XcodeList()
-    static let runtimes = RuntimeList()
-    static var installer: XcodeInstaller!
+    private struct Services {
+        let sessionService: AppleSessionService
+        let xcodeList: XcodeList
+        let runtimeInstaller: RuntimeInstaller
+        let xcodeInstaller: XcodeInstaller
+        let fastlaneSessionManager: FastlaneSessionManager
+    }
+
+    private static func makeServices() -> Services {
+        var xcodesConfiguration = Configuration()
+        try? xcodesConfiguration.load()
+        let sessionService = AppleSessionService(configuration: xcodesConfiguration)
+        let xcodeList = XcodeList()
+        let runtimeList = RuntimeList()
+        return Services(
+            sessionService: sessionService,
+            xcodeList: xcodeList,
+            runtimeInstaller: RuntimeInstaller(runtimeList: runtimeList, sessionService: sessionService),
+            xcodeInstaller: XcodeInstaller(xcodeList: xcodeList, sessionService: sessionService),
+            fastlaneSessionManager: FastlaneSessionManager()
+        )
+    }
+
+    private static func availableXcodeCompletions() -> [String] {
+        XcodeList().availableXcodes
+            .sorted { $0.version < $1.version }
+            .map { $0.version.appleDescription }
+    }
 
     static func main() async {
-        try? xcodesConfiguration.load()
-        installer = XcodeInstaller(configuration: xcodesConfiguration, xcodeList: xcodeList)
         migrateApplicationSupportFiles()
         do {
             var command = try parseAsRoot()
@@ -80,8 +112,8 @@ struct Xcodes: AsyncParsableCommand {
         }
     }
 
-    struct Download: ParsableCommand {
-        static var configuration = CommandConfiguration(
+    struct Download: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
             abstract: "Download a specific version of Xcode",
             discussion: """
                         By default, xcodes will use a URLSession to download the specified version. If aria2 (https://aria2.github.io, available in Homebrew) is installed, either somewhere in PATH or at the path specified by the --aria2 flag, then it will be used instead. aria2 will use up to 16 connections to download Xcode 3-5x faster. If you have aria2 installed and would prefer to not use it, you can use the --no-aria2 flag.
@@ -96,10 +128,10 @@ struct Xcodes: AsyncParsableCommand {
         )
 
         @Argument(help: "The version to download",
-                  completion: .custom { args in xcodeList.availableXcodes.sorted { $0.version < $1.version }.map { $0.version.appleDescription } })
+                  completion: .custom { _ in Xcodes.availableXcodeCompletions() })
         var version: [String] = []
 
-        @Flag(help: "Update and then download the latest non-prerelease version available.")
+        @Flag(help: "Update and then download the latest release version available.")
         var latest: Bool = false
 
         @Flag(help: "Update and then download the latest prerelease version available, including GM seeds and GMs.")
@@ -116,14 +148,22 @@ struct Xcodes: AsyncParsableCommand {
                 completion: .directory)
         var directory: String?
 
+        @Flag(help: "Use fastlane spaceship session.")
+        var useFastlaneAuth: Bool = false
+
+        @Option(help: "The fastlane spaceship user",
+                completion: .shellCommand("ls \(FastlaneSessionManager.Constants.fastlaneSpaceshipDir)"))
+        var fastlaneUser: String = FastlaneSessionManager.Constants.fastlaneSessionEnvVarName
+
         @OptionGroup
         var globalDataSource: GlobalDataSourceOption
 
         @OptionGroup
         var globalColor: GlobalColorOption
 
-        func run() {
-            Rainbow.enabled = Rainbow.enabled && globalColor.color
+        func run() async throws {
+            configureRainbow(enabled: globalColor.color)
+            let services = Xcodes.makeServices()
 
             let versionString = version.joined(separator: " ")
 
@@ -136,27 +176,25 @@ struct Xcodes: AsyncParsableCommand {
             } else {
                 installation = .version(versionString)
             }
+            
+            let downloader = noAria2 ? Downloader.urlSession : Downloader(aria2Path: aria2)
 
-            var downloader = XcodeInstaller.Downloader.urlSession
-            if let aria2Path = aria2.flatMap(Path.init) ?? Current.shell.findExecutable("aria2c"),
-               aria2Path.exists,
-               noAria2 == false {
-                downloader = .aria2(aria2Path)
+            let destination = getDirectory(possibleDirectory: directory, default: .environmentDownloads)
+
+            if useFastlaneAuth {
+                services.fastlaneSessionManager.setupFastlaneAuth(fastlaneUser: fastlaneUser)
             }
 
-            let destination = getDirectory(possibleDirectory: directory, default: Path.home.join("Downloads"))
-
-            installer.download(installation, dataSource: globalDataSource.dataSource, downloader: downloader, destinationDirectory: destination)
-                .catch { error in
-                    Install.processDownloadOrInstall(error: error)
-                }
-
-            RunLoop.current.run()
+            do {
+                try await services.xcodeInstaller.download(installation, dataSource: globalDataSource.dataSource, downloader: downloader, destinationDirectory: destination)
+            } catch {
+                Install.processDownloadOrInstall(error: error)
+            }
         }
     }
 
-    struct Install: ParsableCommand {
-        static var configuration = CommandConfiguration(
+    struct Install: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
             abstract: "Download and install a specific version of Xcode",
             discussion: """
                         By default, xcodes will use a URLSession to download the specified version. If aria2 (https://aria2.github.io, available in Homebrew) is installed, either somewhere in PATH or at the path specified by the --aria2 flag, then it will be used instead. aria2 will use up to 16 connections to download Xcode 3-5x faster. If you have aria2 installed and would prefer to not use it, you can use the --no-aria2 flag.
@@ -172,7 +210,7 @@ struct Xcodes: AsyncParsableCommand {
         )
 
         @Argument(help: "The version to install",
-                  completion: .custom { args in xcodeList.availableXcodes.sorted { $0.version < $1.version }.map { $0.version.appleDescription } })
+                  completion: .custom { _ in Xcodes.availableXcodeCompletions() })
         var version: [String] = []
 
         @Option(name: .customLong("path"),
@@ -180,7 +218,7 @@ struct Xcodes: AsyncParsableCommand {
                 completion: .file(extensions: ["xip"]))
         var pathString: String?
 
-        @Flag(help: "Update and then install the latest non-prerelease version available.")
+        @Flag(help: "Update and then install the latest release version available.")
         var latest: Bool = false
 
         @Flag(help: "Update and then install the latest prerelease version available, including GM seeds and GMs.")
@@ -215,14 +253,22 @@ struct Xcodes: AsyncParsableCommand {
                 completion: .directory)
         var directory: String?
 
+        @Flag(help: "Use fastlane spaceship session.")
+        var useFastlaneAuth: Bool = false
+
+        @Option(help: "The fastlane spaceship user.",
+                completion: .shellCommand("ls \(FastlaneSessionManager.Constants.fastlaneSpaceshipDir)"))
+        var fastlaneUser: String = FastlaneSessionManager.Constants.fastlaneSessionEnvVarName
+
         @OptionGroup
         var globalDataSource: GlobalDataSourceOption
 
         @OptionGroup
         var globalColor: GlobalColorOption
 
-        func run() {
-            Rainbow.enabled = Rainbow.enabled && globalColor.color
+        func run() async throws {
+            configureRainbow(enabled: globalColor.color)
+            let services = Xcodes.makeServices()
 
             let versionString = version.joined(separator: " ")
 
@@ -236,63 +282,55 @@ struct Xcodes: AsyncParsableCommand {
             } else {
                 installation = .version(versionString)
             }
-
-            var downloader = XcodeInstaller.Downloader.urlSession
-            if let aria2Path = aria2.flatMap(Path.init) ?? Current.shell.findExecutable("aria2c"),
-               aria2Path.exists,
-               noAria2 == false {
-                downloader = .aria2(aria2Path)
-            }
+            
+            let downloader = noAria2 ? Downloader.urlSession : Downloader(aria2Path: aria2)
 
             let destination = getDirectory(possibleDirectory: directory)
 
             if select, case .version(let version) = installation {
-                firstly {
-                    selectXcode(shouldPrint: print, pathOrVersion: version, directory: destination, fallbackToInteractive: false)
-                }
-                .catch { _ in
-                    install(installation, using: downloader, to: destination)
+                do {
+                    try await selectXcodeAsync(shouldPrint: print, pathOrVersion: version, directory: destination, fallbackToInteractive: false)
+                } catch {
+                    try await install(installation, using: downloader, to: destination, services: services)
                 }
             } else {
-                install(installation, using: downloader, to: destination)
+                try await install(installation, using: downloader, to: destination, services: services)
             }
-
-            RunLoop.current.run()
         }
 
         private func install(_ installation: XcodeInstaller.InstallationType,
-                             using downloader: XcodeInstaller.Downloader,
-                             to destination: Path) {
-            firstly { () -> Promise<InstalledXcode> in
+                             using downloader: Downloader,
+                             to destination: Path,
+                             services: Xcodes.Services) async throws {
+            do {
+                if useFastlaneAuth { services.fastlaneSessionManager.setupFastlaneAuth(fastlaneUser: fastlaneUser) }
                 // update the list before installing only for version type because the other types already update internally
                 if update, case .version = installation {
                     Current.logging.log("Updating...")
-                    return xcodeList.update(dataSource: globalDataSource.dataSource)
-                        .then { _ -> Promise<InstalledXcode> in
-                            installer.install(installation, dataSource: globalDataSource.dataSource, downloader: downloader, destination: destination, experimentalUnxip: experimentalUnxip, emptyTrash: emptyTrash, noSuperuser: noSuperuser)
-                        }
-                } else {
-                    return installer.install(installation, dataSource: globalDataSource.dataSource, downloader: downloader, destination: destination, experimentalUnxip: experimentalUnxip, emptyTrash: emptyTrash, noSuperuser: noSuperuser)
+                    _ = try await services.xcodeList.updateAvailableXcodes(dataSource: globalDataSource.dataSource)
                 }
-            }
-            .then { xcode -> Promise<Void> in
+
+                let xcode = try await services.xcodeInstaller.install(installation, dataSource: globalDataSource.dataSource, downloader: downloader, destination: destination, experimentalUnxip: experimentalUnxip, emptyTrash: emptyTrash, noSuperuser: noSuperuser)
                 if select {
-                    return selectXcode(shouldPrint: print, pathOrVersion: xcode.path.string, directory: destination, fallbackToInteractive: false) 
-                } else {
-                    return .init()
+                    try await selectXcodeAsync(shouldPrint: print, pathOrVersion: xcode.path.string, directory: destination, fallbackToInteractive: false)
                 }
-            }
-            .done {
                 Install.exit()
-            }
-            .catch { error in
-                Install.processDownloadOrInstall(error: error)
+            } catch {
+                if select, case let XcodeInstaller.Error.versionAlreadyInstalled(installedXcode) = error {
+                    Current.logging.log(error.legibleLocalizedDescription.green)
+                    if select {
+                        try await selectXcodeAsync(shouldPrint: print, pathOrVersion: installedXcode.path.string, directory: destination, fallbackToInteractive: false)
+                    }
+                    Install.exit()
+                } else {
+                    Install.processDownloadOrInstall(error: error)
+                }
             }
         }
     }
 
-    struct Installed: ParsableCommand {
-        static var configuration = CommandConfiguration(
+    struct Installed: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
             abstract: "List the versions of Xcode that are installed"
         )
 
@@ -306,31 +344,31 @@ struct Xcodes: AsyncParsableCommand {
         @OptionGroup
         var globalColor: GlobalColorOption
 
-        func run() {
-            Rainbow.enabled = Rainbow.enabled && globalColor.color
+        func run() async throws {
+            configureRainbow(enabled: globalColor.color)
 
             let directory = getDirectory(possibleDirectory: globalDirectory.directory)
+            let services = Xcodes.makeServices()
 
-            installer.printXcodePath(ofVersion: version.joined(separator: " "), searchingIn: directory)
-                .recover { error -> Promise<Void> in
-                    switch error {
-                    case XcodeInstaller.Error.invalidVersion:
-                        return installer.printInstalledXcodes(directory: directory)
-                    default:
-                        throw error
-                    }
-                }
-                .done { Installed.exit() }
-                .catch { error in Installed.exit(withLegibleError: error) }
-
-            RunLoop.current.run()
+            do {
+                try await services.xcodeInstaller.printXcodePath(ofVersion: version.joined(separator: " "), searchingIn: directory)
+                Installed.exit()
+            } catch XcodeInstaller.Error.invalidVersion {
+                try await services.xcodeInstaller.printInstalledXcodes(directory: directory)
+                Installed.exit()
+            } catch {
+                Installed.exit(withLegibleError: error)
+            }
         }
     }
 
-    struct List: ParsableCommand {
-        static var configuration = CommandConfiguration(
+    struct List: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
             abstract: "List all versions of Xcode that are available to install"
         )
+
+        @Option(help: "Only list Xcodes matching the specified architecture: arm64, x86_64, appleSilicon, or universal. Can be used multiple times.")
+        var architecture: [ArchitectureFilter] = []
 
         @OptionGroup
         var globalDirectory: GlobalDirectoryOption
@@ -341,44 +379,134 @@ struct Xcodes: AsyncParsableCommand {
         @OptionGroup
         var globalColor: GlobalColorOption
 
-        func run() {
-            Rainbow.enabled = Rainbow.enabled && globalColor.color
+        func run() async throws {
+            configureRainbow(enabled: globalColor.color)
 
             let directory = getDirectory(possibleDirectory: globalDirectory.directory)
+            let services = Xcodes.makeServices()
 
-            firstly { () -> Promise<Void> in
-                if xcodeList.shouldUpdateBeforeListingVersions {
-                    return installer.updateAndPrint(dataSource: globalDataSource.dataSource, directory: directory)
+            do {
+                if services.xcodeList.shouldUpdateBeforeListingVersions {
+                    try await services.xcodeInstaller.updateAndPrint(dataSource: globalDataSource.dataSource, directory: directory, architectures: architecture)
                 }
                 else {
-                    return installer.printAvailableXcodes(xcodeList.availableXcodes, installed: Current.files.installedXcodes(directory))
+                    try await services.xcodeInstaller.printAvailableXcodes(services.xcodeList.availableXcodes, installed: Current.files.installedXcodes(directory), architectures: architecture)
                 }
+                List.exit()
+            } catch {
+                List.exit(withLegibleError: error)
             }
-            .done { List.exit() }
-            .catch { error in List.exit(withLegibleError: error) }
-
-            RunLoop.current.run()
         }
     }
 
     struct Runtimes: AsyncParsableCommand {
-        static var configuration = CommandConfiguration(
-            abstract: "List all simulator runtimes that are available to install"
+        static let configuration = CommandConfiguration(
+            abstract: "List all simulator runtimes that are available to install",
+            subcommands: [Download.self, Install.self]
         )
 
         @Flag(help: "Include beta runtimes available to install")
         var includeBetas: Bool = false
 
+        @Option(help: "Only list runtimes matching the specified architecture: arm64, x86_64, appleSilicon, or universal. Can be used multiple times.")
+        var architecture: [ArchitectureFilter] = []
+
+        @OptionGroup
+        var globalColor: GlobalColorOption
+
         func run() async throws {
-            try await runtimes.printAvailableRuntimes(includeBetas: includeBetas)
+            configureRainbow(enabled: globalColor.color)
+
+            let services = Xcodes.makeServices()
+            try await services.runtimeInstaller.printAvailableRuntimes(includeBetas: includeBetas, architectures: architecture)
         }
+
+        struct Install: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Download and install a specific simulator runtime"
+            )
+
+            @Argument(help: "The runtime to install")
+            var version: String
+
+            @Option(help: "The path to an aria2 executable. Searches $PATH by default.",
+                    completion: .file())
+            var aria2: String?
+
+            @Flag(help: "Don't use aria2 to download the runtime, even if its available.")
+            var noAria2: Bool = false
+
+            @Option(help: "The directory to download the runtime archive to. Defaults to ~/Downloads.",
+                    completion: .directory)
+            var directory: String?
+
+            @Option(help: "Install the runtime matching the specified architecture: arm64, x86_64, appleSilicon, or universal. Can be used multiple times.")
+            var architecture: [ArchitectureFilter] = []
+
+            @Flag(help: "Do not delete the runtime archive after the installation is finished.")
+            var keepArchive = false
+
+            @OptionGroup
+            var globalColor: GlobalColorOption
+
+            func run() async throws {
+                configureRainbow(enabled: globalColor.color)
+
+                let downloader = noAria2 ? Downloader.urlSession : Downloader(aria2Path: aria2)
+
+                let destination = getDirectory(possibleDirectory: directory, default: .environmentDownloads)
+                let services = Xcodes.makeServices()
+
+                try await services.runtimeInstaller.downloadAndInstallRuntime(identifier: version, to: destination, with: downloader, shouldDelete: !keepArchive, architectures: architecture)
+                Current.logging.log("Finished")
+            }
+        }
+
+        struct Download: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Download a specific simulator runtime"
+            )
+
+            @Argument(help: "The runtime to download")
+            var version: String
+
+            @Option(help: "The path to an aria2 executable. Searches $PATH by default.",
+                    completion: .file())
+            var aria2: String?
+
+            @Flag(help: "Don't use aria2 to download the runtime, even if its available.")
+            var noAria2: Bool = false
+
+            @Option(help: "The directory to download the runtime archive to. Defaults to ~/Downloads.",
+                    completion: .directory)
+            var directory: String?
+
+            @Option(help: "Download the runtime matching the specified architecture: arm64, x86_64, appleSilicon, or universal. Can be used multiple times.")
+            var architecture: [ArchitectureFilter] = []
+
+            @OptionGroup
+            var globalColor: GlobalColorOption
+
+            func run() async throws {
+                configureRainbow(enabled: globalColor.color)
+
+                let downloader = noAria2 ? Downloader.urlSession : Downloader(aria2Path: aria2)
+
+                let destination = getDirectory(possibleDirectory: directory, default: .environmentDownloads)
+                let services = Xcodes.makeServices()
+
+                try await services.runtimeInstaller.downloadRuntime(identifier: version, to: destination, with: downloader, architectures: architecture)
+                Current.logging.log("Finished")
+            }
+        }
+
     }
 
-    struct Select: ParsableCommand {
-        static var configuration = CommandConfiguration(
+    struct Select: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
             abstract: "Change the selected Xcode",
             discussion: """
-                        Run without any arguments to interactively select from a list, or provide an absolute path.
+                        Select a version of Xcode by specifying a version number or an absolute path. Run without arguments to select the version specified in your .xcode-version file. If no version file is found, you will be prompted to interactively select from a list.
 
                         EXAMPLES:
                           xcodes select
@@ -401,21 +529,22 @@ struct Xcodes: AsyncParsableCommand {
         @OptionGroup
         var globalColor: GlobalColorOption
 
-        func run() {
-            Rainbow.enabled = Rainbow.enabled && globalColor.color
+        func run() async throws {
+            configureRainbow(enabled: globalColor.color)
 
             let directory = getDirectory(possibleDirectory: globalDirectory.directory)
 
-            selectXcode(shouldPrint: print, pathOrVersion: versionOrPath.joined(separator: " "), directory: directory)
-                .done { Select.exit() }
-                .catch { error in Select.exit(withLegibleError: error) }
-
-            RunLoop.current.run()
+            do {
+                try await selectXcodeAsync(shouldPrint: print, pathOrVersion: versionOrPath.joined(separator: " "), directory: directory)
+                Select.exit()
+            } catch {
+                Select.exit(withLegibleError: error)
+            }
         }
     }
 
-    struct Uninstall: ParsableCommand {
-        static var configuration = CommandConfiguration(
+    struct Uninstall: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
             abstract: "Uninstall a version of Xcode",
             discussion: """
                         Run without any arguments to interactively select from a list.
@@ -439,21 +568,23 @@ struct Xcodes: AsyncParsableCommand {
         @OptionGroup
         var globalColor: GlobalColorOption
 
-        func run() {
-            Rainbow.enabled = Rainbow.enabled && globalColor.color
+        func run() async throws {
+            configureRainbow(enabled: globalColor.color)
 
             let directory = getDirectory(possibleDirectory: globalDirectory.directory)
+            let services = Xcodes.makeServices()
 
-            installer.uninstallXcode(version.joined(separator: " "), directory: directory, emptyTrash: emptyTrash)
-                .done { Uninstall.exit() }
-                .catch { error in Uninstall.exit(withLegibleError: error) }
-
-            RunLoop.current.run()
+            do {
+                try await services.xcodeInstaller.uninstallXcode(version.joined(separator: " "), directory: directory, emptyTrash: emptyTrash)
+                Uninstall.exit()
+            } catch {
+                Uninstall.exit(withLegibleError: error)
+            }
         }
     }
 
-    struct Update: ParsableCommand {
-        static var configuration = CommandConfiguration(
+    struct Update: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
             abstract: "Update the list of available versions of Xcode"
         )
 
@@ -466,21 +597,23 @@ struct Xcodes: AsyncParsableCommand {
         @OptionGroup
         var globalColor: GlobalColorOption
 
-        func run() {
-            Rainbow.enabled = Rainbow.enabled && globalColor.color
+        func run() async throws {
+            configureRainbow(enabled: globalColor.color)
 
             let directory = getDirectory(possibleDirectory: globalDirectory.directory)
+            let services = Xcodes.makeServices()
 
-            installer.updateAndPrint(dataSource: globalDataSource.dataSource, directory: directory)
-                .done { Update.exit() }
-                .catch { error in Update.exit(withLegibleError: error) }
-
-            RunLoop.current.run()
+            do {
+                try await services.xcodeInstaller.updateAndPrint(dataSource: globalDataSource.dataSource, directory: directory)
+                Update.exit()
+            } catch {
+                Update.exit(withLegibleError: error)
+            }
         }
     }
 
     struct Version: ParsableCommand {
-        static var configuration = CommandConfiguration(
+        static let configuration = CommandConfiguration(
             abstract: "Print the version number of xcodes itself"
         )
 
@@ -488,34 +621,32 @@ struct Xcodes: AsyncParsableCommand {
         var globalColor: GlobalColorOption
 
         func run() {
-            Rainbow.enabled = Rainbow.enabled && globalColor.color
+            configureRainbow(enabled: globalColor.color)
 
-            Current.logging.log(XcodesKit.version.description)
+            Current.logging.log(XcodesCLIKit.version.description)
         }
     }
 
-    struct Signout: ParsableCommand {
-        static var configuration = CommandConfiguration(
+    struct Signout: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
             abstract: "Clears the stored username and password"
         )
 
         @OptionGroup
         var globalColor: GlobalColorOption
 
-        func run() {
-            Rainbow.enabled = Rainbow.enabled && globalColor.color
-
-            installer.logout()
-                .done {
-                    Current.logging.log("Successfully signed out".green)
-                    Signout.exit()
-                }
-                .recover { error in
-                    Current.logging.log(error.legibleLocalizedDescription)
-                    Signout.exit()
-                }
-
-            RunLoop.current.run()
+        func run() async throws {
+            configureRainbow(enabled: globalColor.color)
+            let services = Xcodes.makeServices()
+            
+            do {
+                try await services.sessionService.logout()
+                Current.logging.log("Successfully signed out".green)
+                Signout.exit()
+            } catch {
+                Current.logging.log(error.legibleLocalizedDescription)
+                Signout.exit()
+            }
         }
     }
 }

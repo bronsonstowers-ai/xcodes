@@ -1,20 +1,30 @@
 {
+  "originHash" : "d5f06ff4dc275a59467f579767ee5db0fef2947a7df458b7911fd3809d83f96d",
   "pins" : [
     {
-      "identity" : "data",
+      "identity" : "asynchttpnetworkservice",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/xcodereleases/data.git",
+      "location" : "https://github.com/XcodesOrg/AsyncHTTPNetworkService",
       "state" : {
-        "revision" : "fcf527b187817f67c05223676341f3ab69d4214d"
+        "branch" : "main",
+        "revision" : "12e225af8b5dc25afcfabfcf582a165b0581ab19"
       }
     },
     {
-      "identity" : "foundation",
+      "identity" : "big-num",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/PromiseKit/Foundation.git",
+      "location" : "https://github.com/adam-fowler/big-num",
       "state" : {
-        "revision" : "985f17fa69ee0e5b7eb3ff9be87ffc4e05fc0927",
-        "version" : "3.4.0"
+        "revision" : "9059dcab8dd001b8143bc512b4477d079e97957f",
+        "version" : "2.0.3"
+      }
+    },
+    {
+      "identity" : "data",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/xcodereleases/data",
+      "state" : {
+        "revision" : "fcf527b187817f67c05223676341f3ab69d4214d"
       }
     },
     {
@@ -31,8 +41,17 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/mxcl/LegibleError.git",
       "state" : {
-        "revision" : "909e9bab3ded97350b28a5ab41dd745dd8aa9710",
-        "version" : "1.0.4"
+        "revision" : "bc596702d7ff618c3f90ba480eeb48b3e83a2fbe",
+        "version" : "1.0.6"
+      }
+    },
+    {
+      "identity" : "libfido2swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/kinoroy/LibFido2Swift",
+      "state" : {
+        "revision" : "b87a93300c5b35307c9f26ae490963196bd927f1",
+        "version" : "0.1.5"
       }
     },
     {
@@ -40,17 +59,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/mxcl/Path.swift.git",
       "state" : {
-        "revision" : "dac007e907a4f4c565cfdc55a9ce148a761a11d5",
-        "version" : "0.16.3"
-      }
-    },
-    {
-      "identity" : "promisekit",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/mxcl/PromiseKit.git",
-      "state" : {
-        "revision" : "1c296a8637838901d2b01e4c46875ee749506133",
-        "version" : "6.8.5"
+        "revision" : "74ec90bbe50a3376e399286fed48b60db9b91bb1",
+        "version" : "1.6.0"
       }
     },
     {
@@ -72,6 +82,24 @@
       }
     },
     {
+      "identity" : "swift-crypto",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-crypto",
+      "state" : {
+        "revision" : "ddb07e896a2a8af79512543b1c7eb9797f8898a5",
+        "version" : "1.1.7"
+      }
+    },
+    {
+      "identity" : "swift-srp",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/xcodesorg/swift-srp",
+      "state" : {
+        "branch" : "main",
+        "revision" : "543aa0122a0257b992f6c7d62d18a26e3dffb8fe"
+      }
+    },
+    {
       "identity" : "swiftsoup",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/scinfu/SwiftSoup.git",
@@ -88,7 +116,16 @@
         "revision" : "087c91fedc110f9f833b14ef4c32745dabca8913",
         "version" : "1.0.3"
       }
+    },
+    {
+      "identity" : "yams",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/jpsim/Yams",
+      "state" : {
+        "revision" : "0d9ee7ea8c4ebd4a489ad7a73d5c6cad55d6fed3",
+        "version" : "5.0.6"
+      }
     }
   ],
-  "version" : 2
+  "version" : 3
 }
